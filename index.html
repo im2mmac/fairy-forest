@@ -49,6 +49,7 @@ function selectFace(detections, previous) {
 
 const $ = id => document.getElementById(id);
 const forest = $('forest');
+const forestImage = document.querySelector('.forest-image');
 const darkness = $('darkness');
 const fairy = $('fairy');
 const fairyCanvas = $('fairy-canvas');
@@ -73,6 +74,8 @@ let fairyPosition = { ...pointer };
 let pointerInside = false, touchActive = false, visibility = 0, lastFrame = 0;
 let sprinkling = false, overControls = false, emissionRemainder = 0;
 let dustParticles = [], dustScale = 1;
+let dustAudio, nextDustChime = 0;
+let backgroundX = 0, backgroundY = 0;
 let stream = null, cameraPending = false, cameraGeneration = 0;
 let detector = null, detectorPromise = null, trackingFailed = false;
 let faceBox = null, faceReady = false, lastFaceSeen = -Infinity;
@@ -338,6 +341,41 @@ function emitDust(x, y, count = 1) {
   if (dustParticles.length > 450) dustParticles.splice(0, dustParticles.length - 450);
 }
 
+function playDustChime() {
+  if (dustAudio?.state !== 'running' || dustAudio.currentTime < nextDustChime) return;
+  const now = dustAudio.currentTime;
+  nextDustChime = now + 1.45;
+  const notes = [659.25, 880, 1108.73, 1318.51];
+  for (const [index, frequency] of notes.entries()) {
+    const start = now + index * .064;
+    const end = start + .24;
+    const tone = dustAudio.createOscillator();
+    const volume = dustAudio.createGain();
+    tone.type = index === 0 ? 'triangle' : 'sine';
+    tone.frequency.setValueAtTime(frequency, start);
+    volume.gain.setValueAtTime(.001, start);
+    volume.gain.linearRampToValueAtTime(.075 - index * .012, start + .012);
+    volume.gain.exponentialRampToValueAtTime(.001, end);
+    tone.connect(volume);
+    volume.connect(dustAudio.destination);
+    tone.onended = () => volume.disconnect();
+    tone.start(start);
+    tone.stop(end);
+  }
+}
+
+async function startDustChime() {
+  const Audio = window.AudioContext ?? window.webkitAudioContext;
+  if (!Audio) return;
+  try {
+    dustAudio ??= new Audio();
+    if (dustAudio.state !== 'running') await dustAudio.resume();
+    if (!document.hidden) playDustChime();
+  } catch {
+    // The forest still works when the browser cannot play audio.
+  }
+}
+
 function drawDust(t, dt) {
   if (sprinkling && pointerInside && !overControls) {
     emissionRemainder += dt * (reducedMotion ? 18 : 65);
@@ -347,6 +385,7 @@ function drawDust(t, dt) {
     if (count) {
       const scale = fairy.clientWidth / 180;
       emitDust(fairyPosition.x + 44 * scale, fairyPosition.y - 21 * scale, count);
+      playDustChime();
     }
   }
   if (!dustParticles.length) { dustCanvas.hidden = true; return; }
@@ -399,10 +438,12 @@ document.addEventListener('pointerdown', e => {
   if ((e.button === 0 || touchActive) && !overControls) {
     sprinkling = true;
     emitDust(pointer.x, pointer.y, reducedMotion ? 6 : 15);
+    if (e.pointerType !== 'touch') void startDustChime();
   }
 });
 document.documentElement.addEventListener('pointerleave', () => { pointerInside = false; touchActive = false; stopSprinkling(); });
 for (const event of ['pointerup', 'pointercancel']) document.addEventListener(event, e => {
+  if (event === 'pointerup' && e.pointerType === 'touch' && sprinkling && !overControls) void startDustChime();
   stopSprinkling();
   if (e.pointerType === 'touch') { touchActive = false; pointerInside = false; }
 });
@@ -430,15 +471,32 @@ $('help-button').addEventListener('click', () => { dialog.showModal(); $('help-b
 $('help-close').addEventListener('click', () => dialog.close());
 dialog.addEventListener('close', () => $('help-button').setAttribute('aria-expanded', 'false'));
 dialog.addEventListener('click', e => { if (e.target === dialog) { const r = dialog.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close(); } });
-document.querySelector('.forest-image').addEventListener('error', () => {
+forestImage.addEventListener('error', () => {
   $('asset-error').hidden = false; $('asset-error').textContent = '숲 이미지를 불러오지 못했어요. 페이지를 새로고침해 주세요.';
 });
+
+function moveForestBackground(dt) {
+  if (reducedMotion || visibility === 0) {
+    backgroundX = 0;
+    backgroundY = 0;
+    forestImage.style.transform = '';
+    return;
+  }
+  // Keep the drift within the area covered by the zoom, even at the edges.
+  const pointerX = Math.max(-1, Math.min(1, 2 * pointer.x / width - 1));
+  const pointerY = Math.max(-1, Math.min(1, 2 * pointer.y / height - 1));
+  backgroundX = approach(backgroundX, -pointerX * Math.min(18, width * .025), .24, dt);
+  backgroundY = approach(backgroundY, -pointerY * Math.min(14, height * .025), .24, dt);
+  const zoom = 1 + .06 * visibility;
+  forestImage.style.transform = `translate3d(${backgroundX * visibility}px, ${backgroundY * visibility}px, 0) scale(${zoom})`;
+}
 
 function frame(t) {
   const dt = Math.min((t - lastFrame) / 1000 || 0, .05); lastFrame = t;
   if (!document.hidden) {
     updateFace(t);
     visibility = Math.min(1, Math.max(0, visibility + (pointerInside ? dt / .4 : -dt / 1.2)));
+    moveForestBackground(dt);
     const spriteWidth = fairy.clientWidth, spriteHeight = fairy.clientHeight;
     const targetX = Math.max(spriteWidth / 2, Math.min(width - spriteWidth / 2, pointer.x + 38));
     const targetY = Math.max(spriteHeight / 2, Math.min(height - spriteHeight / 2, pointer.y - 28));
