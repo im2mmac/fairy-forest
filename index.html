@@ -20,6 +20,7 @@
 @media(min-width:701px) and (max-width:1000px){h1{font-size:clamp(30px,4.2vw,42px)}}
 @media(max-width:700px){h1{font-size:clamp(28px,8.5vw,38px)}}
 #stardust{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1}#forest{user-select:none}.forest-image{-webkit-user-drag:none}
+#forest-blooms{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:-1}
 
 </style>
   <script type="module">
@@ -56,6 +57,8 @@ const fairyCanvas = $('fairy-canvas');
 const ctx = fairyCanvas.getContext('2d');
 const dustCanvas = $('stardust');
 const dustContext = dustCanvas.getContext('2d');
+const bloomCanvas = $('forest-blooms');
+const bloomContext = bloomCanvas.getContext('2d');
 const preview = $('face-preview');
 const pg = preview.getContext('2d');
 const video = $('camera-video');
@@ -73,9 +76,10 @@ let pointer = { x: width * .55, y: height * .55 };
 let fairyPosition = { ...pointer };
 let pointerInside = false, touchActive = false, visibility = 0, lastFrame = 0;
 let sprinkling = false, overControls = false, emissionRemainder = 0;
-let dustParticles = [], dustScale = 1;
+let dustParticles = [];
 let dustAudio, nextDustChime = 0;
-let backgroundX = 0, backgroundY = 0;
+const flowerPatches = new Map();
+const petalColors = ['#f0d9a0', '#dba8bf', '#c6bedf', '#e7b58b'];
 let stream = null, cameraPending = false, cameraGeneration = 0;
 let detector = null, detectorPromise = null, trackingFailed = false;
 let faceBox = null, faceReady = false, lastFaceSeen = -Infinity;
@@ -319,11 +323,13 @@ function updateFace(t) {
   } else renderFace();
 }
 
-function resizeDust() {
-  dustScale = Math.min(window.devicePixelRatio || 1, 2);
-  dustCanvas.width = Math.round(width * dustScale);
-  dustCanvas.height = Math.round(height * dustScale);
-  dustContext.setTransform(dustScale, 0, 0, dustScale, 0, 0);
+function resizeEffects() {
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
+  for (const [canvas, context] of [[dustCanvas, dustContext], [bloomCanvas, bloomContext]]) {
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+  }
 }
 
 function emitDust(x, y, count = 1) {
@@ -449,16 +455,21 @@ for (const event of ['pointerup', 'pointercancel']) document.addEventListener(ev
 });
 window.addEventListener('blur', () => { pointerInside = false; touchActive = false; stopSprinkling(); });
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { pointerInside = false; visibility = 0; fairy.style.opacity = '0'; darkness.style.setProperty('--hole', '1'); stopSprinkling(); dustParticles = []; dustCanvas.hidden = true; }
+  if (document.hidden) {
+    pointerInside = false; visibility = 0; fairy.style.opacity = '0'; darkness.style.setProperty('--hole', '1');
+    stopSprinkling(); dustParticles = []; dustCanvas.hidden = true;
+    flowerPatches.clear(); bloomCanvas.hidden = true;
+  }
 });
 window.addEventListener('pagehide', () => stopCamera());
 window.addEventListener('resize', () => {
   width = forest.clientWidth; height = forest.clientHeight;
   pointer.x = Math.min(pointer.x, width); pointer.y = Math.min(pointer.y, height);
-  resizeDust();
+  flowerPatches.clear();
+  resizeEffects();
 });
 width = forest.clientWidth; height = forest.clientHeight;
-resizeDust();
+resizeEffects();
 if (matchMedia('(pointer: coarse)').matches) $('pointer-hint').textContent = '숲을 누른 채 손끝으로 움직여 보세요';
 
 for (let i = 0; i < 20; i++) {
@@ -475,20 +486,74 @@ forestImage.addEventListener('error', () => {
   $('asset-error').hidden = false; $('asset-error').textContent = '숲 이미지를 불러오지 못했어요. 페이지를 새로고침해 주세요.';
 });
 
-function moveForestBackground(dt) {
-  if (reducedMotion || visibility === 0) {
-    backgroundX = 0;
-    backgroundY = 0;
-    forestImage.style.transform = '';
-    return;
+function lightFlowerPatches(time, lightRadius) {
+  if (!pointerInside || overControls || visibility < .12) return;
+  const spacing = 92;
+  const radius = lightRadius * .50;
+  const left = Math.max(0, Math.floor((pointer.x - radius) / spacing));
+  const top = Math.max(0, Math.floor((pointer.y - radius) / spacing));
+  const right = Math.min(Math.floor(width / spacing), Math.floor((pointer.x + radius) / spacing));
+  const bottom = Math.min(Math.floor(height / spacing), Math.floor((pointer.y + radius) / spacing));
+  for (let row = top; row <= bottom; row++) {
+    for (let col = left; col <= right; col++) {
+      const seed = (col * 83 + row * 59) % 127;
+      const x = col * spacing + 23 + seed % 48;
+      const y = row * spacing + 45 + seed % 30;
+      if (x > width - 18 || y > height - 12 || Math.hypot(x - pointer.x, y - pointer.y) > radius) continue;
+      const key = `${col}:${row}`;
+      if (!flowerPatches.has(key)) flowerPatches.set(key, { x, y, seed, growth: 0, litUntil: 0 });
+      flowerPatches.get(key).litUntil = time + 260;
+    }
   }
-  // Keep the drift within the area covered by the zoom, even at the edges.
-  const pointerX = Math.max(-1, Math.min(1, 2 * pointer.x / width - 1));
-  const pointerY = Math.max(-1, Math.min(1, 2 * pointer.y / height - 1));
-  backgroundX = approach(backgroundX, -pointerX * Math.min(18, width * .025), .24, dt);
-  backgroundY = approach(backgroundY, -pointerY * Math.min(14, height * .025), .24, dt);
-  const zoom = 1 + .06 * visibility;
-  forestImage.style.transform = `translate3d(${backgroundX * visibility}px, ${backgroundY * visibility}px, 0) scale(${zoom})`;
+}
+
+function paintFlowerPatch(patch, time) {
+  const g = bloomContext;
+  g.save();
+  g.translate(patch.x, patch.y);
+  for (let i = 0; i < 3; i++) {
+    const growth = Math.max(0, Math.min(1, patch.growth * 1.36 - i * .17));
+    if (!growth) continue;
+    const size = (i === 1 ? 9 : 6) + patch.seed % 3;
+    const stemHeight = ((i === 1 ? 32 : 21) + patch.seed % 9) * (reducedMotion ? 1 : .28 + .72 * growth);
+    const sway = reducedMotion ? 0 : 3 * Math.sin(time * .002 + patch.seed + i);
+    const tip = (i - 1) * 8 + sway;
+    const petal = petalColors[(patch.seed + i) % petalColors.length];
+
+    g.save();
+    g.translate((i - 1) * 15, i === 1 ? -3 : 5);
+    g.globalAlpha = growth * visibility * .95;
+    g.strokeStyle = '#8eb380'; g.lineWidth = 1.35; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(0, 0); g.quadraticCurveTo(tip * .25, -stemHeight * .55, tip, -stemHeight); g.stroke();
+    ellipse(g, -3, -stemHeight * .44, 5, 1.85, '#729968', .58);
+    ellipse(g, 4, -stemHeight * .62, 5, 1.85, '#aac88a', -.66);
+
+    g.translate(tip, -stemHeight);
+    const spread = reducedMotion ? 1 : .24 + .76 * growth;
+    g.shadowColor = petal; g.shadowBlur = 9;
+    for (let p = 0; p < 5; p++) {
+      const angle = p * Math.PI * 2 / 5 - Math.PI / 2;
+      ellipse(g, Math.cos(angle) * size * .63 * spread, Math.sin(angle) * size * .63 * spread, size * .56 * spread, size * .34 * spread, petal, angle);
+    }
+    g.shadowBlur = 3;
+    ellipse(g, 0, 0, size * .29 * spread, size * .29 * spread, '#fff1b4');
+    g.restore();
+  }
+  g.restore();
+}
+
+function drawForestBlooms(time, dt, lightRadius) {
+  lightFlowerPatches(time, lightRadius);
+  if (!flowerPatches.size) { bloomCanvas.hidden = true; return; }
+  bloomContext.clearRect(0, 0, width, height);
+  for (const [key, patch] of flowerPatches) {
+    const lit = pointerInside && time < patch.litUntil;
+    const speed = reducedMotion ? 5 : lit ? 1.8 : 1.25;
+    patch.growth = Math.max(0, Math.min(1, patch.growth + (lit ? 1 : -1) * dt * speed));
+    if (patch.growth === 0 && !lit) flowerPatches.delete(key);
+    else paintFlowerPatch(patch, time);
+  }
+  bloomCanvas.hidden = !flowerPatches.size;
 }
 
 function frame(t) {
@@ -496,7 +561,7 @@ function frame(t) {
   if (!document.hidden) {
     updateFace(t);
     visibility = Math.min(1, Math.max(0, visibility + (pointerInside ? dt / .4 : -dt / 1.2)));
-    moveForestBackground(dt);
+    const lightRadius = Math.max(210, Math.min(340, width * .24));
     const spriteWidth = fairy.clientWidth, spriteHeight = fairy.clientHeight;
     const targetX = Math.max(spriteWidth / 2, Math.min(width - spriteWidth / 2, pointer.x + 38));
     const targetY = Math.max(spriteHeight / 2, Math.min(height - spriteHeight / 2, pointer.y - 28));
@@ -504,9 +569,10 @@ function frame(t) {
     fairyPosition.y = approach(fairyPosition.y, targetY, reducedMotion ? .035 : .15, dt);
     darkness.style.setProperty('--light-x', `${pointer.x}px`); darkness.style.setProperty('--light-y', `${pointer.y}px`);
     darkness.style.setProperty('--hole', String(1 - visibility * .97));
-    darkness.style.setProperty('--radius', `${Math.max(210, Math.min(340, width * .24))}px`);
+    darkness.style.setProperty('--radius', `${lightRadius}px`);
     fairy.style.opacity = visibility;
     fairy.style.transform = `translate3d(${fairyPosition.x - spriteWidth / 2}px,${fairyPosition.y - spriteHeight / 2}px,0)`;
+    drawForestBlooms(t, dt, lightRadius);
     drawDust(t, dt);
     if (visibility > 0) drawFairy(t);
   }
@@ -531,6 +597,7 @@ requestAnimationFrame(frame);
     <div id="darkness" aria-hidden="true"></div>
     <div class="forest-vignette" aria-hidden="true"></div>
     <div id="fireflies" aria-hidden="true"></div>
+    <canvas id="forest-blooms" aria-hidden="true" hidden></canvas>
     <canvas id="stardust" aria-hidden="true" hidden></canvas>
     <div id="fairy" aria-hidden="true"><canvas id="fairy-canvas" width="360" height="408"></canvas></div>
 
@@ -543,7 +610,7 @@ requestAnimationFrame(frame);
     <section class="intro" aria-labelledby="forest-title">
       <p class="eyebrow"><span></span> A LITTLE LIGHT, A LITTLE MAGIC</p>
       <h1 id="forest-title">어둠 속에서<br>발견하는 <em>작은 마법.</em></h1>
-      <p class="intro-description">마우스가 닿는 곳에 빛이 피어나고,<br>당신을 닮은 요정이 날아옵니다.</p>
+      <p class="intro-description">빛이 닿는 곳에 작은 꽃이 피고,<br>당신을 닮은 요정이 날아옵니다.</p>
       <div class="invitation"><svg><use href="#mouse"/></svg><span id="pointer-hint">왼쪽 버튼을 누른 채 빛가루를 뿌려 보세요</span><span class="invitation-line"></span></div>
     </section>
 
